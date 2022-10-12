@@ -3,12 +3,12 @@ module DynamicObjects
 
 import Base:getproperty,setproperty!, haskey, get, get!,propertynames ,
     getindex, setindex!, iterate, length
-export DynamicObject, dtype, typetag, DynObj
+export DynamicObject, dtype, typetag, DynObj, @Dynamic
 
 
 const defaultTag = gensym("default")
 
-docstr="""
+#=docstr="""
 ```
 DynamicObject{TypeTag,T}  <: AbstractDict{Symbol,T}
 ```
@@ -77,23 +77,37 @@ julia> apply(multthese)
 6
 ```
 """
+=#
 
-struct DynamicObject{TypeTag,T} <: AbstractDict{Symbol,T}
-    d::Dict{Symbol,T}
-    DynamicObject{TT,T}(p::Pair{Symbol,<:T}...;kwargs...) where {TT,T} = new{TT,T}(Dict{Symbol,T}(p...,kwargs...)) 
+struct DynamicObject{TypeTag, T} <: AbstractDict{Symbol,Any}
+    fields::T
+    d::Dict{Symbol,Any}
+    
+    DynamicObject{TT,Nothing}(p::Pair{Symbol,_T}...;kwargs...) where {TT,_T} = new{TT,Nothing}(Dict{Symbol,Any}(p...,kwargs...))
+    DynamicObject{TT,_T}(args...;kwargs...) where {TT,_T} =begin
+        nfields=fieldcount(_T)
+        _fields=_T(args[1:nfields])
+        _d=Dict(args[nfields+1:end]...,kwargs...)
+        return new(_fields,_d)
+    end
+
     
 end
+
 const DynObj = DynamicObject
-@doc docstr DynamicObject
-@doc docstr DynObj
+const _UnspecificObject = DynamicObject{T,Nothing} where T
+#@doc docstr DynamicObject
+#@doc docstr DynObj
 
 
-DynamicObject(args...;kwargs...)=DynamicObject{defaultTag}(args...;kwargs...)
-DynamicObject{T}(::Type{S},args...;kwargs...) where{T,S}=DynamicObject{T,S}(args...;kwargs...)
-DynamicObject{T}(args...;kwargs...) where {T}=DynamicObject{T,Any}(args...;kwargs...)
+DynamicObject(args...;kwargs...)=DynamicObject{defaultTag,Nothing}(args...;kwargs...)
+#DynamicObject{T}(::Type{S},args...;kwargs...) where{T,S}=DynamicObject{T,S}(args...;kwargs...)
+DynamicObject{T}(args...;kwargs...) where {T}=DynamicObject{T,Nothing}(args...;kwargs...)
+#DynamicObject{TT,T}(args...,kwargs...)
 
 
 _getdict(o::DynamicObject) = getfield(o,:d)
+_getfields(o::DynamicObject) = getfield(o,:fields)
 
 """
 ```
@@ -109,12 +123,17 @@ dtype(::DynamicObject{TT,T}) where {TT,T}
 ```
 Returns the value type of the object
 """
-dtype(::DynamicObject{TT,T}) where {TT,T} = T
+typespec(::DynamicObject{TT,T}) where {TT,T} = T
 
 
-getproperty(o::DynamicObject,s::Symbol) = _getdict(o)[s]
-setproperty!(o::DynamicObject,s::Symbol,x) = (_getdict(o)[s]=x)
-propertynames(o::DynamicObject) = Tuple(keys(_getdict(o)))
+getproperty(o::_UnspecificObject,s::Symbol) = _getdict(o)[s]
+getproperty(o::DynamicObject{TT,T}, s::Symbol) where {TT,T} = s in fieldnames(T) ? getfield(_getfields(o),s) : _getdict(o)[s]
+
+setproperty!(o::_UnspecificObject,s::Symbol,x) = (_getdict(o)[s]=x)
+setproperty!(o::DynamicObject{TT,T}, s::Symbol, x) where {TT,T} = s in fieldnames(T) ? setproperty!(_getfields(o),s,x) : (_getdict(o)[s] = x)
+
+propertynames(o::_UnspecificObject) = Tuple(keys(_getdict(o)))
+propertynames(o::DynamicObject{TT,T}) where {TT,T} = keys(_getdict(o)) ∪ fieldnames(T)
 
     # these functions are to be inherited from Dict
     let mapfunctions=( :( haskey(o::DynamicObject,k) ), 
@@ -156,5 +175,43 @@ function Base.showarg(io::IO,::DynamicObject{TT,T},toplvl) where {TT,T}
     end
 end
 
+
+macro Dynamic(expr::Expr)
+    expr.head==:struct || throw("Dynamic handles structdefs only")
+    expr.args[2] isa Expr && expr.args[2].head == :curly && throw("Parametric structdefs not supported")
+    @assert expr.args[1] isa Bool && expr.args[2] isa Symbol && expr.args[3] isa Expr && expr.args[3].head == :block  "Format of the struct definition not understood."
+    
+    typename = expr.args[2]
+    fieldlist = expr.args[3].args
+    
+    fieldnames=[]
+    fieldtypes=[]
+    
+    #print(fieldlist)
+    for e in fieldlist
+        if e isa LineNumberNode
+            continue
+        elseif e isa Symbol
+            push!(fieldnames,e)
+            push!(fieldtypes,Any)
+        elseif e isa Expr && e.head == Symbol("::")
+            push!(fieldnames,e.args[1])
+            push!(fieldtypes, eval(e.args[2]))
+        else
+            throw("Format of fields not understood")
+        end
+    end
+    
+    #println(fieldnames)
+    #println(fieldtypes)
+    typeparam=length(fieldlist)==0 ? Nothing : NamedTuple{Tuple(fieldnames), Tuple{fieldtypes...}}
+    retEx=quote
+        const $(esc(typename)) = DynamicObject{$(QuoteNode(typename)), $typeparam}
+    end
+    return retEx
+end
+        
+    
+    
       
 end # module
